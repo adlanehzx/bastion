@@ -1,118 +1,118 @@
 # Bastion
 
-**Coffre DeFi personnel qui exécute automatiquement mes ordres de trading sur BNB Chain : DCA, ordres limites, stop-loss et take-profit.**
+**A personal DeFi vault that automatically executes my trading orders on BNB Chain: DCA, limit orders, stop-loss and take-profit.**
 
-Les fonds restent dans un smart contract dont je suis le seul propriétaire. Un robot (le *keeper*) déclenche les ordres quand leurs conditions sont remplies, mais il ne peut jamais retirer les fonds ni échanger à un mauvais prix.
+Funds stay in a smart contract that only I own. A bot (the *keeper*) triggers orders when their conditions are met, but it can never withdraw funds or swap at a bad price.
 
 ![Solidity](https://img.shields.io/badge/Solidity-0.8.28-363636)
 ![Foundry](https://img.shields.io/badge/Foundry-tests%20%2B%20fuzzing-orange)
 ![Rust](https://img.shields.io/badge/Rust-keeper-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-> ⚠️ Projet personnel non audité. À utiliser sur testnet, sur un fork local, ou avec de petites sommes.
+> ⚠️ Unaudited personal project. Use it on testnet, on a local fork, or with small amounts only.
 
-## Stratégies
+## Strategies
 
-| Ordre | Déclencheur | Exemple |
+| Order | Trigger | Example |
 | --- | --- | --- |
-| **DCA** | Toutes les `interval` secondes, `n` fois | 100 USDT → BNB chaque semaine, 10 fois |
-| **Ordre limite (achat)** | Prix ≤ cible | Acheter du BNB si le prix passe sous 500 $ |
-| **Stop-loss** | Prix ≤ cible | Vendre mon BNB s'il passe sous 450 $ |
-| **Take-profit / limite (vente)** | Prix ≥ cible | Vendre mon BNB s'il dépasse 800 $ |
+| **DCA** | Every `interval` seconds, `n` times | 100 USDT → BNB every week, 10 times |
+| **Limit order (buy)** | Price ≤ target | Buy BNB if the price drops below $500 |
+| **Stop-loss** | Price ≤ target | Sell my BNB if it drops below $450 |
+| **Take-profit / limit (sell)** | Price ≥ target | Sell my BNB if it rises above $800 |
 
-## Modèle de sécurité
+## Security model
 
-| Rôle | Peut | Ne peut pas |
+| Role | Can | Cannot |
 | --- | --- | --- |
-| **Propriétaire** | Déposer, retirer, créer et annuler des ordres, changer de keeper, mettre en pause | — |
-| **Keeper** | Appeler `execute(id)` quand la condition est remplie | Retirer, créer ou modifier un ordre, changer la configuration |
+| **Owner** | Deposit, withdraw, create and cancel orders, change keeper, pause | — |
+| **Keeper** | Call `execute(id)` once the condition is met | Withdraw, create or modify an order, change the configuration |
 
-Les protections du contrat ([`contracts/src/Vault.sol`](contracts/src/Vault.sol)) :
+Contract protections ([`contracts/src/Vault.sol`](contracts/src/Vault.sol)):
 
-- **Prix par oracle Chainlink**, jamais par le pool : le montant minimum reçu est calculé à partir du prix Chainlink moins la tolérance choisie (10 % maximum). Un pool manipulé (attaque sandwich, flash loan) fait échouer l'échange au lieu de faire perdre des fonds.
-- **Double vérification** : le contrat mesure lui-même ce qu'il a reçu, sans se fier à la réponse du router.
-- **Prix périmés refusés** : un âge maximal est fixé pour chaque oracle.
-- **Bonnes pratiques** : `checks-effects-interactions`, `ReentrancyGuard`, `SafeERC20`, approbation remise à zéro après chaque échange, transfert de propriété en deux étapes, pause d'urgence.
+- **Prices come from a Chainlink oracle**, never from the pool: the minimum amount received is computed from the Chainlink price minus the chosen tolerance (10 % at most). A manipulated pool (sandwich attack, flash loan) makes the swap fail instead of losing funds.
+- **Double check**: the contract measures what it actually received itself, without trusting the router's response.
+- **Stale prices are rejected**: a maximum age is set for each oracle.
+- **Best practices**: `checks-effects-interactions`, `ReentrancyGuard`, `SafeERC20`, approval reset to zero after every swap, two-step ownership transfer, emergency pause.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    O[Propriétaire] -->|dépôts, ordres, retraits| V[Vault.sol]
-    K[Keeper Rust] -->|executableOrders| V
-    K -->|simulation eth_call puis execute| V
-    V -->|prix| C[Oracles Chainlink]
-    V -->|swap avec minimum garanti| P[PancakeSwap V2]
+    O[Owner] -->|deposits, orders, withdrawals| V[Vault.sol]
+    K[Rust keeper] -->|executableOrders| V
+    K -->|eth_call simulation, then execute| V
+    V -->|prices| C[Chainlink oracles]
+    V -->|swap with guaranteed minimum| P[PancakeSwap V2]
     K -->|notification| T[Telegram]
 ```
 
 ```
-contracts/   Foundry : Vault.sol, interfaces, mocks, tests, scripts de déploiement
-keeper/      Robot Rust (alloy) : lit les ordres prêts, simule, envoie, notifie
-scripts/     Test de bout en bout (anvil + contrat + keeper)
+contracts/   Foundry: Vault.sol, interfaces, mocks, tests, deployment scripts
+keeper/      Rust bot (alloy): reads ready orders, simulates, sends, notifies
+scripts/     End-to-end test (anvil + contract + keeper)
 ```
 
-Le keeper **simule chaque transaction avant de l'envoyer** : il ne paie jamais de gas pour une transaction qui échouerait, et il traduit les erreurs du contrat en messages lisibles (« prix de l'oracle périmé », « solde insuffisant »…). Il refuse aussi d'envoyer si le prix du gas dépasse une limite.
+The keeper **simulates every transaction before sending it**: it never pays gas for a transaction that would fail, and it turns contract errors into readable messages ("stale oracle price", "insufficient balance"…). It also refuses to send when the gas price exceeds a limit.
 
 ## Tests
 
 ```bash
-cd contracts && forge test     # 29 tests : unitaires, fuzzing et invariants
-cd keeper && cargo test        # décodage des erreurs, formatage
-./scripts/e2e.sh               # chaîne locale + contrat + keeper réel
+cd contracts && forge test     # 29 tests: unit, fuzzing and invariants
+cd keeper && cargo test        # error decoding, formatting
+./scripts/e2e.sh               # local chain + contract + real keeper
 ```
 
-- **Tests unitaires** : droits d'accès, validation des ordres, chaque stratégie, oracle périmé ou invalide, pause, routage via WBNB.
-- **Fuzzing** : le minimum garanti correspond toujours à la valeur oracle moins la tolérance, et une exécution n'est jamais pire que la tolérance, quelle que soit la qualité du pool.
-- **Invariants** (8 000 appels aléatoires par campagne : keeper, temps, prix, pool manipulé, router malhonnête) :
-  - le keeper ne reçoit jamais de fonds ;
-  - aucune exécution ne dépasse la tolérance de prix ;
-  - un ordre ne s'exécute jamais plus de fois que prévu ;
-  - aucune approbation ne reste ouverte vers le router.
-- **Bout en bout** : déploiement sur anvil, puis le keeper Rust exécute le DCA, ignore l'ordre limite non déclenché et refuse un wallet qui n'est pas le keeper.
+- **Unit tests**: access control, order validation, each strategy, stale or invalid oracle, pause, routing through WBNB.
+- **Fuzzing**: the guaranteed minimum always equals the oracle value minus the tolerance, and an execution is never worse than the tolerance, whatever the pool quality.
+- **Invariants** (8,000 random calls per campaign: keeper, time, prices, manipulated pool, dishonest router):
+  - the keeper never receives funds;
+  - no execution exceeds the price tolerance;
+  - an order never executes more times than planned;
+  - no approval stays open towards the router.
+- **End to end**: deployment on anvil, then the Rust keeper executes the DCA, skips the limit order that has not triggered, and rejects a wallet that is not the keeper.
 
-## Utilisation
+## Usage
 
-### 1. Déployer le coffre
+### 1. Deploy the vault
 
 ```bash
 cd contracts
-cast wallet import deployer --interactive        # clé chiffrée, jamais en clair
+cast wallet import deployer --interactive        # encrypted key, never in plain text
 
-ROUTER=0x... WRAPPED_NATIVE=0x... KEEPER=0xADRESSE_DU_KEEPER \
+ROUTER=0x... WRAPPED_NATIVE=0x... KEEPER=0xKEEPER_ADDRESS \
 FEED_TOKENS=0xWBNB,0xUSDT FEED_AGGREGATORS=0xFEED_BNB_USD,0xFEED_USDT_USD \
 forge script script/Deploy.s.sol --rpc-url $RPC_URL --account deployer --broadcast
 ```
 
-Les adresses du router PancakeSwap, du WBNB et des oracles Chainlink dépendent du réseau. Vérifiez-les dans la documentation officielle de PancakeSwap et de Chainlink (*Data Feeds*, BNB Chain).
+The PancakeSwap router, WBNB and Chainlink oracle addresses depend on the network. Check them in the official PancakeSwap and Chainlink documentation (*Data Feeds*, BNB Chain).
 
-> Astuce : pour tester avec les vrais pools et les vrais oracles sans dépenser un centime, lancez un fork local du mainnet avec `anvil --fork-url <RPC BSC mainnet>` et déployez dessus. Sur le testnet, les prix des pools PancakeSwap ne suivent pas ceux de Chainlink, donc la protection contre le slippage y fait échouer les échanges.
+> Tip: to test with real pools and real oracles without spending a cent, start a local mainnet fork with `anvil --fork-url <BSC mainnet RPC>` and deploy on it. On testnet, PancakeSwap pool prices do not track Chainlink's, so the slippage protection makes swaps fail there.
 
-### 2. Créer des ordres
+### 2. Create orders
 
 ```bash
-# Approvisionner le coffre en USDT, puis : 100 USDT → WBNB chaque semaine, 10 fois, 1 % de tolérance
+# Fund the vault with USDT, then: 100 USDT → WBNB every week, 10 times, 1 % tolerance
 cast send $VAULT "createDca(address,address,uint128,uint32,uint32,uint16)" \
   $USDT $WBNB 100000000000000000000 604800 10 100 --account deployer --rpc-url $RPC_URL
 ```
 
-### 3. Lancer le keeper
+### 3. Run the keeper
 
 ```bash
 cd keeper
-cp .env.example .env       # RPC_URL, VAULT_ADDRESS, KEEPER_PRIVATE_KEY (wallet dédié avec un peu de BNB pour le gas)
-cargo run --release        # tourne en continu
-cargo run --release -- once  # un seul passage
-DRY_RUN=true cargo run --release -- once  # simule sans rien envoyer, sans clé
+cp .env.example .env       # RPC_URL, VAULT_ADDRESS, KEEPER_PRIVATE_KEY (dedicated wallet with a little BNB for gas)
+cargo run --release        # runs continuously
+cargo run --release -- once  # a single pass
+DRY_RUN=true cargo run --release -- once  # simulates without sending anything, no key needed
 ```
 
-## Feuille de route
+## Roadmap
 
-- [ ] Interface web pour créer et suivre les ordres (Next.js + wagmi)
-- [ ] Protection contre les tokens à risque grâce au score de [RugRadar](https://github.com/adlanehzx/rugradar)
-- [ ] Support de PancakeSwap V3
-- [ ] Ordres « trailing stop »
+- [ ] Web interface to create and track orders (Next.js + wagmi)
+- [ ] Protection against risky tokens using the [RugRadar](https://github.com/adlanehzx/rugradar) score
+- [ ] PancakeSwap V3 support
+- [ ] Trailing-stop orders
 
-## Licence
+## License
 
 [MIT](LICENSE) © Adlane Hamzaoui
